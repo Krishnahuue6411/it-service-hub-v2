@@ -57,7 +57,7 @@ jobs:
           if [ -d android ]; then
             cd android
             ./gradlew bundleRelease \
-              -Pandroid.injected.signing.store.file=release-key.jks \
+              -Pandroid.injected.signing.store.file=app/release-key.jks \
               -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASSWORD }}" \
               -Pandroid.injected.signing.key.alias="${{ secrets.KEY_ALIAS }}" \
               -Pandroid.injected.signing.key.password="${{ secrets.KEY_PASSWORD }}"
