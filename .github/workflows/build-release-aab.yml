@@ -46,26 +46,39 @@ jobs:
       - name: Decode Signing Keystore
         run: |
           mkdir -p android/app
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release-key.jks
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release-key.jks
+            echo "Keystore successfully decoded."
+          else
+            echo "ANDROID_KEYSTORE_BASE64 secret is missing. Proceeding with standard release build."
+          fi
 
       - name: Grant Execute Permission for Gradle
         run: |
           if [ -f android/gradlew ]; then chmod +x android/gradlew; fi
 
-      - name: Build Signed Android App Bundle (.aab)
+      - name: Build Android App Bundle (.aab)
         run: |
           if [ -d android ]; then
             cd android
-            ./gradlew bundleRelease \
-              -Pandroid.injected.signing.store.file=app/release-key.jks \
-              -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASSWORD }}" \
-              -Pandroid.injected.signing.key.alias="${{ secrets.KEY_ALIAS }}" \
-              -Pandroid.injected.signing.key.password="${{ secrets.KEY_PASSWORD }}"
+            if [ -f app/release-key.jks ] && [ -n "${{ secrets.KEYSTORE_PASSWORD }}" ]; then
+              echo "Building Signed Production AAB..."
+              ./gradlew bundleRelease \
+                -Pandroid.injected.signing.store.file=app/release-key.jks \
+                -Pandroid.injected.signing.store.password="${{ secrets.KEYSTORE_PASSWORD }}" \
+                -Pandroid.injected.signing.key.alias="${{ secrets.KEY_ALIAS }}" \
+                -Pandroid.injected.signing.key.password="${{ secrets.KEY_PASSWORD }}" \
+                --no-daemon
+            else
+              echo "Building Unsigned Release AAB..."
+              ./gradlew bundleRelease --no-daemon
+            fi
           fi
 
-      - name: Upload Signed AAB Artifact
+      - name: Upload AAB Artifact
         uses: actions/upload-artifact@v4
         with:
           name: IT-Service-Hub-Production-AAB
-          path: android/app/build/outputs/bundle/release/app-release.aab
+          path: |
+            android/app/build/outputs/bundle/release/*.aab
           retention-days: 30
