@@ -2,7 +2,27 @@
 
 import { revalidatePath } from 'next/cache';
 import { createServerSupabaseClient } from '../lib/supabase/server';
-import { Business, BusinessSettings, Party, Item, BomRecipe, Invoice, PurchaseOrder, PurchaseInvoice, CreatePurchaseOrderDTO, ConvertPoToBillDTO, CreateBomRecipeDTO, ExecuteProductionRunDTO } from '../types/erp';
+import { 
+  Business, 
+  BusinessSettings, 
+  Party, 
+  Item, 
+  BomRecipe, 
+  Invoice, 
+  PurchaseOrder, 
+  PurchaseInvoice, 
+  Payment,
+  RecordPaymentDTO,
+  LedgerEntry,
+  Gstr1Summary,
+  Gstr3bSummary,
+  DaybookSummary,
+  ProfitLossStatement,
+  CreatePurchaseOrderDTO, 
+  ConvertPoToBillDTO, 
+  CreateBomRecipeDTO, 
+  ExecuteProductionRunDTO 
+} from '../types/erp';
 import { 
   INITIAL_ERP_BUSINESS, 
   MOCK_ERP_PARTIES, 
@@ -10,7 +30,8 @@ import {
   MOCK_ERP_BOM_RECIPES, 
   MOCK_ERP_INVOICES,
   MOCK_ERP_PURCHASE_ORDERS,
-  MOCK_ERP_PURCHASE_INVOICES 
+  MOCK_ERP_PURCHASE_INVOICES,
+  MOCK_ERP_PAYMENTS 
 } from '../lib/erp/erp-mock-data';
 
 // In-memory tenant state fallback for preview / offline mode
@@ -21,6 +42,7 @@ let liveBomState: BomRecipe[] = [...MOCK_ERP_BOM_RECIPES];
 let liveInvoicesState: Invoice[] = [...MOCK_ERP_INVOICES];
 let livePurchaseOrdersState: PurchaseOrder[] = [...MOCK_ERP_PURCHASE_ORDERS];
 let livePurchaseInvoicesState: PurchaseInvoice[] = [...MOCK_ERP_PURCHASE_INVOICES];
+let livePaymentsState: Payment[] = [...MOCK_ERP_PAYMENTS];
 
 // 1. Fetch Current Business Profile & Settings
 export async function getBusinessProfile(businessId: string = INITIAL_ERP_BUSINESS.id): Promise<Business> {
@@ -735,5 +757,473 @@ export async function executeProductionRun(
     },
   };
 }
+
+// 16. Fetch Payments
+export async function getPayments(businessId: string = INITIAL_ERP_BUSINESS.id, partyId?: string): Promise<Payment[]> {
+  const supabase = await createServerSupabaseClient();
+  try {
+    let query = supabase.from('payments').select('*, party:parties(*)').eq('business_id', businessId);
+    if (partyId) query = query.eq('party_id', partyId);
+    const { data, error } = await query.order('payment_date', { ascending: false });
+    if (!error && data && data.length > 0) return data as Payment[];
+  } catch {}
+
+  if (partyId) {
+    return livePaymentsState.filter((p) => p.party_id === partyId);
+  }
+  return livePaymentsState;
+}
+
+// 17. Record Party Payment In / Out
+export async function recordPartyPayment(
+  payload: RecordPaymentDTO
+): Promise<{ success: boolean; data: Payment; newBalance: number }> {
+  const paymentId = `pay-${Date.now()}`;
+  const party = livePartiesState.find((p) => p.id === payload.party_id);
+  if (!party) throw new Error('Party not found');
+
+  const newPayment: Payment = {
+    id: paymentId,
+    business_id: payload.business_id,
+    party_id: payload.party_id,
+    party: party,
+    invoice_id: payload.invoice_id,
+    purchase_invoice_id: payload.purchase_invoice_id,
+    payment_type: payload.payment_type,
+    amount: payload.amount,
+    payment_mode: payload.payment_mode,
+    reference_number: payload.reference_number,
+    payment_date: payload.payment_date,
+    notes: payload.notes,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  // 1. Insert into live payments state
+  livePaymentsState = [newPayment, ...livePaymentsState];
+
+  // 2. Adjust Party Current Balance
+  // PAYMENT_IN (Customer pays): reduces receivable
+  // PAYMENT_OUT (We pay supplier): increases balance towards 0
+  let newBalance = party.current_balance;
+  if (payload.payment_type === 'PAYMENT_IN') {
+    newBalance = Number((party.current_balance - payload.amount).toFixed(2));
+  } else {
+    newBalance = Number((party.current_balance + payload.amount).toFixed(2));
+  }
+
+  livePartiesState = livePartiesState.map((p) => {
+    if (p.id === payload.party_id) {
+      return {
+        ...p,
+        current_balance: newBalance,
+        updated_at: new Date().toISOString(),
+      };
+    }
+    return p;
+  });
+
+  // 3. Update Invoice paid status if linked
+  if (payload.invoice_id) {
+    liveInvoicesState = liveInvoicesState.map((inv) => {
+      if (inv.id === payload.invoice_id) {
+        const newPaid = inv.paid_amount + payload.amount;
+        const newBal = Math.max(0, inv.balance_amount - payload.amount);
+        return {
+          ...inv,
+          paid_amount: Number(newPaid.toFixed(2)),
+          balance_amount: Number(newBal.toFixed(2)),
+          status: newBal <= 0 ? 'PAID' : 'PARTIALLY_PAID',
+          updated_at: new Date().toISOString(),
+        };
+      }
+      return inv;
+    });
+  }
+
+  // 4. Update Purchase Invoice paid status if linked
+  if (payload.purchase_invoice_id) {
+    livePurchaseInvoicesState = livePurchaseInvoicesState.map((pInv) => {
+      if (pInv.id === payload.purchase_invoice_id) {
+        const newPaid = pInv.paid_amount + payload.amount;
+        const newBal = Math.max(0, pInv.balance_amount - payload.amount);
+        return {
+          ...pInv,
+          paid_amount: Number(newPaid.toFixed(2)),
+          balance_amount: Number(newBal.toFixed(2)),
+          status: newBal <= 0 ? 'PAID' : 'PARTIALLY_PAID',
+          updated_at: new Date().toISOString(),
+        };
+      }
+      return pInv;
+    });
+  }
+
+  // 5. Run Supabase Stored Procedure if available
+  const supabase = await createServerSupabaseClient();
+  try {
+    await supabase.rpc('record_party_payment', { p_data: payload });
+  } catch (err) {
+    console.warn('Supabase record_party_payment note (memory fallback active):', err);
+  }
+
+  revalidatePath('/dashboard/parties');
+  revalidatePath(`/dashboard/parties/${payload.party_id}`);
+  revalidatePath('/dashboard');
+  revalidatePath('/dashboard/reports/daybook');
+
+  return { success: true, data: newPayment, newBalance };
+}
+
+// 18. Generate Chronological Running Balance Ledger for Party
+export async function getPartyLedger(partyId: string): Promise<{ party: Party | null; entries: LedgerEntry[] }> {
+  const party = livePartiesState.find((p) => p.id === partyId) || null;
+  if (!party) return { party: null, entries: [] };
+
+  const entries: LedgerEntry[] = [];
+
+  // Opening balance entry if non-zero
+  if (party.opening_balance && party.opening_balance !== 0) {
+    entries.push({
+      id: `open-${party.id}`,
+      date: party.created_at.split('T')[0],
+      type: 'OPENING_BALANCE',
+      reference_number: 'OP-BAL',
+      description: 'Opening Balance Carried Forward',
+      debit: party.opening_balance > 0 ? party.opening_balance : 0,
+      credit: party.opening_balance < 0 ? Math.abs(party.opening_balance) : 0,
+      running_balance: party.opening_balance,
+    });
+  }
+
+  // Sales Invoices (Customer owes debit)
+  const partyInvoices = liveInvoicesState.filter((inv) => inv.customer_id === partyId);
+  partyInvoices.forEach((inv) => {
+    entries.push({
+      id: inv.id,
+      date: inv.invoice_date,
+      type: 'INVOICE',
+      reference_number: inv.invoice_number,
+      description: `Tax Invoice (${inv.items?.length || 1} items)`,
+      debit: inv.grand_total,
+      credit: 0,
+      running_balance: 0, // calculated below
+    });
+  });
+
+  // Purchase Invoices (Supplier payable credit)
+  const partyBills = livePurchaseInvoicesState.filter((b) => b.supplier_id === partyId);
+  partyBills.forEach((b) => {
+    entries.push({
+      id: b.id,
+      date: b.bill_date,
+      type: 'PURCHASE_BILL',
+      reference_number: b.bill_number,
+      description: `Purchase Inward Bill (${b.vendor_invoice_number ? 'Ref: ' + b.vendor_invoice_number : ''})`,
+      debit: 0,
+      credit: b.grand_total,
+      running_balance: 0,
+    });
+  });
+
+  // Payments (Payment In reduces customer balance; Payment Out settles supplier balance)
+  const partyPayments = livePaymentsState.filter((p) => p.party_id === partyId);
+  partyPayments.forEach((p) => {
+    entries.push({
+      id: p.id,
+      date: p.payment_date,
+      type: p.payment_type,
+      reference_number: p.reference_number || 'RECEIPT',
+      description: `${p.payment_type === 'PAYMENT_IN' ? 'Payment Received' : 'Payment Dispatched'} via ${p.payment_mode}`,
+      debit: p.payment_type === 'PAYMENT_OUT' ? p.amount : 0,
+      credit: p.payment_type === 'PAYMENT_IN' ? p.amount : 0,
+      running_balance: 0,
+    });
+  });
+
+  // Sort chronologically ascending
+  entries.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  // Calculate Running Balance
+  let running = 0;
+  entries.forEach((entry) => {
+    if (party.type === 'CUSTOMER') {
+      running += (entry.debit - entry.credit);
+    } else {
+      // Supplier (credit bills make balance negative liability, debit payments reduce liability)
+      running += (entry.debit - entry.credit);
+    }
+    entry.running_balance = Number(running.toFixed(2));
+  });
+
+  return { party, entries };
+}
+
+// 19. GSTR-1 Tax Data Generator
+export async function getGstr1Data(businessId: string = INITIAL_ERP_BUSINESS.id): Promise<Gstr1Summary> {
+  const invoices = liveInvoicesState.filter((i) => i.business_id === businessId);
+  const parties = livePartiesState;
+
+  const b2bInvoices = invoices
+    .filter((inv) => {
+      const p = parties.find((party) => party.id === inv.customer_id);
+      return Boolean(p?.gstin && p.gstin.trim().length === 15);
+    })
+    .map((inv) => {
+      const p = parties.find((party) => party.id === inv.customer_id);
+      return {
+        invoice_number: inv.invoice_number,
+        invoice_date: inv.invoice_date,
+        customer_name: p?.company_name || p?.name || 'B2B Party',
+        customer_gstin: p?.gstin || '',
+        place_of_supply: inv.igst_amount > 0 ? 'Inter-State' : '27-Maharashtra',
+        taxable_value: inv.taxable_amount,
+        tax_rate: 18,
+        cgst_amount: inv.cgst_amount,
+        sgst_amount: inv.sgst_amount,
+        igst_amount: inv.igst_amount,
+        total_invoice_value: inv.grand_total,
+      };
+    });
+
+  const b2cInvoices = invoices
+    .filter((inv) => {
+      const p = parties.find((party) => party.id === inv.customer_id);
+      return !p?.gstin || p.gstin.trim().length !== 15;
+    })
+    .map((inv) => ({
+      invoice_number: inv.invoice_number,
+      invoice_date: inv.invoice_date,
+      taxable_value: inv.taxable_amount,
+      cgst_amount: inv.cgst_amount,
+      sgst_amount: inv.sgst_amount,
+      grand_total: inv.grand_total,
+    }));
+
+  // HSN Aggregation
+  const hsnMap: { [code: string]: { description: string; uqc: string; qty: number; taxable: number; cgst: number; sgst: number; igst: number; total: number } } = {};
+
+  invoices.forEach((inv) => {
+    (inv.items || []).forEach((item) => {
+      const code = item.hsn_sac_code || '847170';
+      if (!hsnMap[code]) {
+        hsnMap[code] = {
+          description: item.item_name,
+          uqc: item.unit || 'PCS',
+          qty: 0,
+          taxable: 0,
+          cgst: 0,
+          sgst: 0,
+          igst: 0,
+          total: 0,
+        };
+      }
+      hsnMap[code].qty += item.quantity;
+      hsnMap[code].taxable += item.taxable_value;
+      hsnMap[code].cgst += item.cgst_amount;
+      hsnMap[code].sgst += item.sgst_amount;
+      hsnMap[code].igst += item.igst_amount;
+      hsnMap[code].total += item.total_amount;
+    });
+  });
+
+  const hsnSummary = Object.entries(hsnMap).map(([code, data]) => ({
+    hsn_code: code,
+    description: data.description,
+    uqc: data.uqc,
+    total_quantity: data.qty,
+    total_value: Number(data.total.toFixed(2)),
+    taxable_value: Number(data.taxable.toFixed(2)),
+    integrated_tax: Number(data.igst.toFixed(2)),
+    central_tax: Number(data.cgst.toFixed(2)),
+    state_tax: Number(data.sgst.toFixed(2)),
+  }));
+
+  const totalTaxable = invoices.reduce((s, i) => s + i.taxable_amount, 0);
+  const totalCgst = invoices.reduce((s, i) => s + i.cgst_amount, 0);
+  const totalSgst = invoices.reduce((s, i) => s + i.sgst_amount, 0);
+  const totalIgst = invoices.reduce((s, i) => s + i.igst_amount, 0);
+
+  return {
+    b2b_invoices: b2bInvoices,
+    b2c_invoices: b2cInvoices,
+    hsn_summary: hsnSummary,
+    total_taxable_turnover: Number(totalTaxable.toFixed(2)),
+    total_cgst: Number(totalCgst.toFixed(2)),
+    total_sgst: Number(totalSgst.toFixed(2)),
+    total_igst: Number(totalIgst.toFixed(2)),
+    total_tax_collected: Number((totalCgst + totalSgst + totalIgst).toFixed(2)),
+  };
+}
+
+// 20. GSTR-3B Tax Liability & Input Tax Credit (ITC) Summary
+export async function getGstr3bData(businessId: string = INITIAL_ERP_BUSINESS.id): Promise<Gstr3bSummary> {
+  const sales = liveInvoicesState.filter((i) => i.business_id === businessId);
+  const purchases = livePurchaseInvoicesState.filter((p) => p.business_id === businessId);
+
+  // Outward tax liability
+  const outTaxable = sales.reduce((s, i) => s + i.taxable_amount, 0);
+  const outCgst = sales.reduce((s, i) => s + i.cgst_amount, 0);
+  const outSgst = sales.reduce((s, i) => s + i.sgst_amount, 0);
+  const outIgst = sales.reduce((s, i) => s + i.igst_amount, 0);
+
+  // Eligible Input Tax Credit (ITC from purchase bills)
+  const inTaxable = purchases.reduce((s, p) => s + p.taxable_amount, 0);
+  const inCgst = purchases.reduce((s, p) => s + p.cgst_amount, 0);
+  const inSgst = purchases.reduce((s, p) => s + p.sgst_amount, 0);
+  const inIgst = purchases.reduce((s, p) => s + p.igst_amount, 0);
+
+  // Net Tax Payable = Max(0, Outward - Inward ITC)
+  const netCgst = Math.max(0, outCgst - inCgst);
+  const netSgst = Math.max(0, outSgst - inSgst);
+  const netIgst = Math.max(0, outIgst - inIgst);
+
+  return {
+    outward_taxable_supplies: {
+      total_taxable_value: Number(outTaxable.toFixed(2)),
+      cgst: Number(outCgst.toFixed(2)),
+      sgst: Number(outSgst.toFixed(2)),
+      igst: Number(outIgst.toFixed(2)),
+    },
+    eligible_itc: {
+      total_taxable_value: Number(inTaxable.toFixed(2)),
+      cgst: Number(inCgst.toFixed(2)),
+      sgst: Number(inSgst.toFixed(2)),
+      igst: Number(inIgst.toFixed(2)),
+    },
+    net_tax_payable: {
+      cgst: Number(netCgst.toFixed(2)),
+      sgst: Number(netSgst.toFixed(2)),
+      igst: Number(netIgst.toFixed(2)),
+      total: Number((netCgst + netSgst + netIgst).toFixed(2)),
+    },
+  };
+}
+
+// 21. Daily Cashbook / Daybook Generator
+export async function getDaybookData(businessId: string = INITIAL_ERP_BUSINESS.id, date?: string): Promise<DaybookSummary> {
+  const targetDate = date || new Date().toISOString().split('T')[0];
+  const openingCash = 15000.00; // Standard morning float
+
+  // Invoices created today
+  const dailyInvoices = liveInvoicesState.filter((i) => i.invoice_date === targetDate);
+  const dailyPayments = livePaymentsState.filter((p) => p.payment_date === targetDate);
+
+  const transactions: import('../types/erp').DaybookTransaction[] = [];
+  let cashInflow = 0;
+  let cashOutflow = 0;
+  let upiReceipts = 0;
+  let bankReceipts = 0;
+
+  dailyInvoices.forEach((inv) => {
+    if (inv.payment_mode === 'CASH' && inv.paid_amount > 0) {
+      cashInflow += inv.paid_amount;
+      transactions.push({
+        id: `db-inv-${inv.id}`,
+        time: '10:15 AM',
+        type: 'CASH_SALE',
+        entity_name: `Cash Customer (Inv #${inv.invoice_number})`,
+        reference_no: inv.invoice_number,
+        inflow: inv.paid_amount,
+        outflow: 0,
+        mode: 'CASH',
+      });
+    } else if (inv.payment_mode === 'UPI' && inv.paid_amount > 0) {
+      upiReceipts += inv.paid_amount;
+      transactions.push({
+        id: `db-inv-upi-${inv.id}`,
+        time: '11:45 AM',
+        type: 'DIGITAL_SALE',
+        entity_name: `B2B Client (Inv #${inv.invoice_number})`,
+        reference_no: inv.invoice_number,
+        inflow: inv.paid_amount,
+        outflow: 0,
+        mode: 'UPI',
+      });
+    }
+  });
+
+  dailyPayments.forEach((p) => {
+    if (p.payment_type === 'PAYMENT_IN') {
+      if (p.payment_mode === 'CASH') cashInflow += p.amount;
+      else if (p.payment_mode === 'UPI') upiReceipts += p.amount;
+      else bankReceipts += p.amount;
+
+      transactions.push({
+        id: `db-p-${p.id}`,
+        time: '02:30 PM',
+        type: 'CUSTOMER_PAYMENT',
+        entity_name: p.party?.name || 'Customer Khata Payment',
+        reference_no: p.reference_number || 'RECEIPT',
+        inflow: p.amount,
+        outflow: 0,
+        mode: p.payment_mode,
+        notes: p.notes,
+      });
+    } else {
+      if (p.payment_mode === 'CASH') cashOutflow += p.amount;
+      transactions.push({
+        id: `db-p-${p.id}`,
+        time: '04:00 PM',
+        type: 'SUPPLIER_PAYMENT',
+        entity_name: p.party?.name || 'Vendor Payment',
+        reference_no: p.reference_number || 'PAYOUT',
+        inflow: 0,
+        outflow: p.amount,
+        mode: p.payment_mode,
+        notes: p.notes,
+      });
+    }
+  });
+
+  return {
+    date: targetDate,
+    opening_cash_balance: openingCash,
+    cash_inflows: Number(cashInflow.toFixed(2)),
+    cash_outflows: Number(cashOutflow.toFixed(2)),
+    closing_cash_drawer: Number((openingCash + cashInflow - cashOutflow).toFixed(2)),
+    digital_receipts_upi: Number(upiReceipts.toFixed(2)),
+    digital_receipts_bank: Number(bankReceipts.toFixed(2)),
+    transactions,
+  };
+}
+
+// 22. Profit & Loss (P&L) Statement Engine
+export async function getProfitLossData(businessId: string = INITIAL_ERP_BUSINESS.id): Promise<ProfitLossStatement> {
+  const invoices = liveInvoicesState.filter((i) => i.business_id === businessId);
+  const items = liveItemsState;
+
+  // 1. Total Sales Revenue
+  const salesRevenue = invoices.reduce((sum, inv) => sum + inv.taxable_amount, 0);
+
+  // 2. Cost of Goods Sold (COGS)
+  let cogs = 0;
+  invoices.forEach((inv) => {
+    (inv.items || []).forEach((item) => {
+      const itmObj = items.find((i) => i.id === item.item_id);
+      const purchaseRate = itmObj?.purchase_price || item.unit_price * 0.70;
+      cogs += item.quantity * purchaseRate;
+    });
+  });
+
+  const grossProfit = Math.max(0, salesRevenue - cogs);
+  const grossMarginPct = salesRevenue > 0 ? (grossProfit / salesRevenue) * 100 : 0;
+
+  // Operating Expenses (electricity, courier, labor overhead)
+  const operatingExpenses = 4200.00;
+  const netProfit = grossProfit - operatingExpenses;
+  const netProfitPct = salesRevenue > 0 ? (netProfit / salesRevenue) * 100 : 0;
+
+  return {
+    sales_revenue: Number(salesRevenue.toFixed(2)),
+    cost_of_goods_sold: Number(cogs.toFixed(2)),
+    gross_profit: Number(grossProfit.toFixed(2)),
+    gross_margin_percentage: Number(grossMarginPct.toFixed(1)),
+    operating_expenses: Number(operatingExpenses.toFixed(2)),
+    net_profit: Number(netProfit.toFixed(2)),
+    net_profit_percentage: Number(netProfitPct.toFixed(1)),
+  };
+}
+
 
 

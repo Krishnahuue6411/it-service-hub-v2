@@ -392,4 +392,147 @@ export interface ExecuteProductionRunDTO {
   quantity: number;
 }
 
+// 10. Phase 4: Payments, Ledgers & Financial Reporting
+export type PaymentType = 'PAYMENT_IN' | 'PAYMENT_OUT';
+
+export interface Payment {
+  id: string;
+  business_id: string;
+  party_id: string;
+  party?: Party;
+  invoice_id?: string;
+  purchase_invoice_id?: string;
+  payment_type: PaymentType;
+  amount: number;
+  payment_mode: PaymentMode;
+  reference_number?: string;
+  payment_date: string;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordPaymentDTO {
+  business_id: string;
+  party_id: string;
+  payment_type: PaymentType;
+  amount: number;
+  payment_mode: PaymentMode;
+  reference_number?: string;
+  payment_date: string;
+  invoice_id?: string;
+  purchase_invoice_id?: string;
+  notes?: string;
+}
+
+export interface LedgerEntry {
+  id: string;
+  date: string;
+  type: 'INVOICE' | 'PAYMENT_IN' | 'PURCHASE_BILL' | 'PAYMENT_OUT' | 'OPENING_BALANCE';
+  reference_number: string;
+  description: string;
+  debit: number;   // Money customer owes us (or money we gave)
+  credit: number;  // Money customer paid us (or vendor bill owed)
+  running_balance: number;
+}
+
+export interface Gstr1B2BInvoice {
+  invoice_number: string;
+  invoice_date: string;
+  customer_name: string;
+  customer_gstin: string;
+  place_of_supply: string;
+  taxable_value: number;
+  tax_rate: number;
+  cgst_amount: number;
+  sgst_amount: number;
+  igst_amount: number;
+  total_invoice_value: number;
+}
+
+export interface Gstr1HsnItem {
+  hsn_code: string;
+  description: string;
+  uqc: string;
+  total_quantity: number;
+  total_value: number;
+  taxable_value: number;
+  integrated_tax: number;
+  central_tax: number;
+  state_tax: number;
+}
+
+export interface Gstr1Summary {
+  b2b_invoices: Gstr1B2BInvoice[];
+  b2c_invoices: {
+    invoice_number: string;
+    invoice_date: string;
+    taxable_value: number;
+    cgst_amount: number;
+    sgst_amount: number;
+    grand_total: number;
+  }[];
+  hsn_summary: Gstr1HsnItem[];
+  total_taxable_turnover: number;
+  total_cgst: number;
+  total_sgst: number;
+  total_igst: number;
+  total_tax_collected: number;
+}
+
+export interface Gstr3bSummary {
+  outward_taxable_supplies: {
+    total_taxable_value: number;
+    igst: number;
+    cgst: number;
+    sgst: number;
+  };
+  eligible_itc: {
+    total_taxable_value: number;
+    igst: number;
+    cgst: number;
+    sgst: number;
+  };
+  net_tax_payable: {
+    igst: number;
+    cgst: number;
+    sgst: number;
+    total: number;
+  };
+}
+
+export interface DaybookTransaction {
+  id: string;
+  time: string;
+  type: 'CASH_SALE' | 'DIGITAL_SALE' | 'CUSTOMER_PAYMENT' | 'SUPPLIER_PAYMENT' | 'PURCHASE_EXPENSE';
+  entity_name: string;
+  reference_no: string;
+  inflow: number;
+  outflow: number;
+  mode: PaymentMode;
+  notes?: string;
+}
+
+export interface DaybookSummary {
+  date: string;
+  opening_cash_balance: number;
+  cash_inflows: number;
+  cash_outflows: number;
+  closing_cash_drawer: number;
+  digital_receipts_upi: number;
+  digital_receipts_bank: number;
+  transactions: DaybookTransaction[];
+}
+
+export interface ProfitLossStatement {
+  sales_revenue: number;
+  cost_of_goods_sold: number;
+  gross_profit: number;
+  gross_margin_percentage: number;
+  operating_expenses: number;
+  net_profit: number;
+  net_profit_percentage: number;
+}
+
+
 

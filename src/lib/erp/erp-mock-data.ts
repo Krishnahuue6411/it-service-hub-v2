@@ -363,3 +363,48 @@ export const MOCK_ERP_PURCHASE_INVOICES: import('../../types/erp').PurchaseInvoi
   },
 ];
 
+export const MOCK_ERP_PAYMENTS: import('../../types/erp').Payment[] = [
+  {
+    id: 'pay-001',
+    business_id: 'a0000000-0000-0000-0000-000000000001',
+    party_id: 'pty-101',
+    invoice_id: 'inv-1041',
+    payment_type: 'PAYMENT_IN',
+    amount: 10497.00,
+    payment_mode: 'UPI',
+    reference_number: 'UPI/623489110293',
+    payment_date: '2026-08-28',
+    notes: 'Full payment received against Inv #PAIS/26-27/1041',
+    created_at: '2026-08-28T14:30:00Z',
+    updated_at: '2026-08-28T14:30:00Z',
+  },
+  {
+    id: 'pay-002',
+    business_id: 'a0000000-0000-0000-0000-000000000001',
+    party_id: 'pty-101',
+    payment_type: 'PAYMENT_IN',
+    amount: 15000.00,
+    payment_mode: 'BANK_TRANSFER',
+    reference_number: 'NEFT/HDFC/998811',
+    payment_date: '2026-08-20',
+    notes: 'Partial khata settlement against previous balance',
+    created_at: '2026-08-20T11:00:00Z',
+    updated_at: '2026-08-20T11:00:00Z',
+  },
+  {
+    id: 'pay-003',
+    business_id: 'a0000000-0000-0000-0000-000000000001',
+    party_id: 'pty-201',
+    purchase_invoice_id: 'pb-0023',
+    payment_type: 'PAYMENT_OUT',
+    amount: 25000.00,
+    payment_mode: 'BANK_TRANSFER',
+    reference_number: 'RTGS/SBI/55443322',
+    payment_date: '2026-08-25',
+    notes: 'Advance installment towards component shipment',
+    created_at: '2026-08-25T16:00:00Z',
+    updated_at: '2026-08-25T16:00:00Z',
+  },
+];
+
+

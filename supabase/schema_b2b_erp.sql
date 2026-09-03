@@ -867,4 +867,136 @@ BEGIN
 END;
 $$;
 
+-- ==============================================================================
+-- PHASE 4: PAYMENTS & UDHAARI LEDGER SETTLEMENT
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS public.payments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    business_id UUID NOT NULL REFERENCES public.businesses(id) ON DELETE CASCADE,
+    party_id UUID NOT NULL REFERENCES public.parties(id) ON DELETE RESTRICT,
+    invoice_id UUID REFERENCES public.invoices(id) ON DELETE SET NULL,
+    purchase_invoice_id UUID REFERENCES public.purchase_invoices(id) ON DELETE SET NULL,
+    payment_type VARCHAR(20) NOT NULL CHECK (payment_type IN ('PAYMENT_IN', 'PAYMENT_OUT')),
+    amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+    payment_mode VARCHAR(20) NOT NULL DEFAULT 'CASH' CHECK (payment_mode IN ('CASH', 'UPI', 'BANK_TRANSFER', 'CHEQUE')),
+    reference_number VARCHAR(100),
+    payment_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Payments multi-tenant isolation"
+ON public.payments
+FOR ALL
+USING (public.is_business_member(business_id));
+
+-- ==============================================================================
+-- STORED PROCEDURE 3: record_party_payment
+-- Records payment in / out, adjusts party current_balance atomically,
+-- and updates invoice paid status if linked.
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION public.record_party_payment(
+    p_data JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_payment_id UUID := uuid_generate_v4();
+    v_business_id UUID := (p_data->>'business_id')::UUID;
+    v_party_id UUID := (p_data->>'party_id')::UUID;
+    v_invoice_id UUID := (p_data->>'invoice_id')::UUID;
+    v_purchase_inv_id UUID := (p_data->>'purchase_invoice_id')::UUID;
+    v_payment_type VARCHAR(20) := p_data->>'payment_type';
+    v_amount NUMERIC := (p_data->>'amount')::NUMERIC;
+    v_payment_mode VARCHAR(20) := COALESCE(p_data->>'payment_mode', 'CASH');
+    v_ref_no TEXT := p_data->>'reference_number';
+    v_date DATE := COALESCE((p_data->>'payment_date')::DATE, CURRENT_DATE);
+    v_notes TEXT := p_data->>'notes';
+    v_new_balance NUMERIC;
+BEGIN
+    -- 1. Insert Payment Record
+    INSERT INTO public.payments (
+        id,
+        business_id,
+        party_id,
+        invoice_id,
+        purchase_invoice_id,
+        payment_type,
+        amount,
+        payment_mode,
+        reference_number,
+        payment_date,
+        notes
+    ) VALUES (
+        v_payment_id,
+        v_business_id,
+        v_party_id,
+        v_invoice_id,
+        v_purchase_inv_id,
+        v_payment_type,
+        v_amount,
+        v_payment_mode,
+        v_ref_no,
+        v_date,
+        v_notes
+    );
+
+    -- 2. Atomically Adjust Party Balance
+    -- PAYMENT_IN (Customer pays us): current_balance decreases (receivable drops)
+    -- PAYMENT_OUT (We pay supplier): current_balance increases towards 0 (liability drops)
+    IF v_payment_type = 'PAYMENT_IN' THEN
+        UPDATE public.parties
+        SET current_balance = current_balance - v_amount,
+            updated_at = NOW()
+        WHERE id = v_party_id
+        RETURNING current_balance INTO v_new_balance;
+    ELSE
+        UPDATE public.parties
+        SET current_balance = current_balance + v_amount,
+            updated_at = NOW()
+        WHERE id = v_party_id
+        RETURNING current_balance INTO v_new_balance;
+    END IF;
+
+    -- 3. If linked to a specific sales invoice, update invoice paid amount and status
+    IF v_invoice_id IS NOT NULL THEN
+        UPDATE public.invoices
+        SET paid_amount = paid_amount + v_amount,
+            balance_amount = GREATEST(0, balance_amount - v_amount),
+            status = CASE 
+                WHEN (balance_amount - v_amount) <= 0 THEN 'PAID'
+                ELSE 'PARTIALLY_PAID'
+            END,
+            updated_at = NOW()
+        WHERE id = v_invoice_id;
+    END IF;
+
+    -- 4. If linked to a purchase bill, update purchase invoice paid status
+    IF v_purchase_inv_id IS NOT NULL THEN
+        UPDATE public.purchase_invoices
+        SET paid_amount = paid_amount + v_amount,
+            balance_amount = GREATEST(0, balance_amount - v_amount),
+            status = CASE 
+                WHEN (balance_amount - v_amount) <= 0 THEN 'PAID'
+                ELSE 'PARTIALLY_PAID'
+            END,
+            updated_at = NOW()
+        WHERE id = v_purchase_inv_id;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'payment_id', v_payment_id,
+        'new_balance', v_new_balance
+    );
+END;
+$$;
+
+
 
