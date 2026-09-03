@@ -291,3 +291,105 @@ export interface CreatePartyDTO {
   opening_balance?: number;
 }
 
+// 9. Phase 3: Vendor Purchase Invoices & DTOs
+export interface PurchaseInvoiceItem {
+  id?: string;
+  purchase_invoice_id?: string;
+  item_id: string;
+  item_name: string;
+  hsn_sac_code?: string;
+  quantity: number;
+  unit: ItemUnit;
+  unit_price: number;
+  tax_rate: number;
+  tax_amount: number;
+  total_amount: number;
+}
+
+export interface PurchaseInvoice {
+  id: string;
+  business_id: string;
+  supplier_id: string;
+  supplier?: Party;
+  purchase_order_id?: string;
+  bill_number: string;
+  vendor_invoice_number?: string;
+  bill_date: string;
+  due_date?: string;
+  status: 'PAID' | 'PARTIALLY_PAID' | 'UNPAID';
+  payment_mode: PaymentMode;
+  taxable_amount: number;
+  cgst_amount: number;
+  sgst_amount: number;
+  igst_amount: number;
+  grand_total: number;
+  paid_amount: number;
+  balance_amount: number;
+  notes?: string;
+  items?: PurchaseInvoiceItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatePurchaseOrderItemDTO {
+  item_id: string;
+  quantity: number;
+  unit_price: number;
+  tax_rate: number;
+}
+
+export interface CreatePurchaseOrderDTO {
+  business_id: string;
+  supplier_id: string;
+  po_number?: string;
+  order_date: string;
+  expected_delivery_date?: string;
+  notes?: string;
+  items: CreatePurchaseOrderItemDTO[];
+}
+
+export interface ConvertPoToBillDTO {
+  po_id: string;
+  bill_number: string;
+  vendor_invoice_number?: string;
+  bill_date: string;
+  due_date?: string;
+  payment_mode: PaymentMode;
+  paid_amount: number;
+  notes?: string;
+  items: {
+    item_id: string;
+    item_name: string;
+    hsn_sac_code?: string;
+    received_quantity: number;
+    unit: ItemUnit;
+    unit_price: number;
+    tax_rate: number;
+    tax_amount: number;
+    total_amount: number;
+  }[];
+}
+
+export interface CreateBomIngredientDTO {
+  raw_material_item_id: string;
+  required_quantity: number;
+  waste_percentage?: number;
+}
+
+export interface CreateBomRecipeDTO {
+  business_id: string;
+  output_item_id: string;
+  recipe_name: string;
+  output_quantity: number;
+  production_cost_overhead: number;
+  notes?: string;
+  ingredients: CreateBomIngredientDTO[];
+}
+
+export interface ExecuteProductionRunDTO {
+  business_id: string;
+  recipe_id: string;
+  quantity: number;
+}
+
+

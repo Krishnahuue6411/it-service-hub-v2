@@ -549,3 +549,322 @@ BEGIN
 END;
 $$;
 
+-- ==============================================================================
+-- PHASE 3: PURCHASE INVOICES (Vendor Bills & Supplier Inward Ledger)
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS public.purchase_invoices (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    business_id UUID NOT NULL REFERENCES public.businesses(id) ON DELETE CASCADE,
+    supplier_id UUID NOT NULL REFERENCES public.parties(id) ON DELETE RESTRICT,
+    purchase_order_id UUID REFERENCES public.purchase_orders(id) ON DELETE SET NULL,
+    bill_number VARCHAR(50) NOT NULL,
+    vendor_invoice_number VARCHAR(50),
+    bill_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    due_date DATE,
+    status VARCHAR(20) NOT NULL DEFAULT 'UNPAID' CHECK (status IN ('PAID', 'PARTIALLY_PAID', 'UNPAID')),
+    payment_mode VARCHAR(20) NOT NULL DEFAULT 'CREDIT' CHECK (payment_mode IN ('CASH', 'UPI', 'BANK_TRANSFER', 'CHEQUE', 'CREDIT')),
+    taxable_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    cgst_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    sgst_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    igst_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    grand_total NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    paid_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    balance_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    UNIQUE(business_id, bill_number)
+);
+
+CREATE TABLE IF NOT EXISTS public.purchase_invoice_items (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    purchase_invoice_id UUID NOT NULL REFERENCES public.purchase_invoices(id) ON DELETE CASCADE,
+    item_id UUID NOT NULL REFERENCES public.items(id) ON DELETE RESTRICT,
+    item_name TEXT NOT NULL,
+    hsn_sac_code VARCHAR(20),
+    quantity NUMERIC(12, 3) NOT NULL,
+    unit VARCHAR(10) NOT NULL DEFAULT 'PCS',
+    unit_price NUMERIC(12, 2) NOT NULL,
+    tax_rate NUMERIC(5, 2) NOT NULL DEFAULT 18.00,
+    tax_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    total_amount NUMERIC(12, 2) NOT NULL
+);
+
+ALTER TABLE public.purchase_invoices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_invoice_items ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Purchase invoices multi-tenant isolation"
+ON public.purchase_invoices
+FOR ALL
+USING (public.is_business_member(business_id));
+
+CREATE POLICY "Purchase invoice items isolation"
+ON public.purchase_invoice_items
+FOR ALL
+USING (EXISTS (SELECT 1 FROM public.purchase_invoices pi WHERE pi.id = purchase_invoice_id AND public.is_business_member(pi.business_id)));
+
+-- ==============================================================================
+-- STORED PROCEDURE 1: convert_po_to_purchase_bill
+-- Converts PO to vendor bill, increments stock, logs stock movement, and
+-- updates supplier accounts payable balance.
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION public.convert_po_to_purchase_bill(
+    p_po_id UUID,
+    p_bill_data JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_po RECORD;
+    v_bill_id UUID := uuid_generate_v4();
+    v_bill_number TEXT := p_bill_data->>'bill_number';
+    v_vendor_inv_num TEXT := p_bill_data->>'vendor_invoice_number';
+    v_grand_total NUMERIC := (p_bill_data->>'grand_total')::NUMERIC;
+    v_paid_amount NUMERIC := COALESCE((p_bill_data->>'paid_amount')::NUMERIC, 0.00);
+    v_balance_amount NUMERIC := v_grand_total - v_paid_amount;
+    v_item JSONB;
+    v_item_id UUID;
+    v_received_qty NUMERIC;
+    v_all_received BOOLEAN := true;
+BEGIN
+    -- 1. Fetch Purchase Order
+    SELECT * INTO v_po FROM public.purchase_orders WHERE id = p_po_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Purchase Order % not found', p_po_id;
+    END IF;
+
+    -- 2. Create Purchase Invoice Record
+    INSERT INTO public.purchase_invoices (
+        id,
+        business_id,
+        supplier_id,
+        purchase_order_id,
+        bill_number,
+        vendor_invoice_number,
+        bill_date,
+        due_date,
+        status,
+        payment_mode,
+        taxable_amount,
+        cgst_amount,
+        sgst_amount,
+        igst_amount,
+        grand_total,
+        paid_amount,
+        balance_amount,
+        notes
+    ) VALUES (
+        v_bill_id,
+        v_po.business_id,
+        v_po.supplier_id,
+        p_po_id,
+        v_bill_number,
+        v_vendor_inv_num,
+        COALESCE((p_bill_data->>'bill_date')::DATE, CURRENT_DATE),
+        (p_bill_data->>'due_date')::DATE,
+        CASE 
+            WHEN v_balance_amount <= 0 THEN 'PAID'
+            WHEN v_paid_amount > 0 THEN 'PARTIALLY_PAID'
+            ELSE 'UNPAID'
+        END,
+        COALESCE(p_bill_data->>'payment_mode', 'CREDIT'),
+        (p_bill_data->>'taxable_amount')::NUMERIC,
+        COALESCE((p_bill_data->>'cgst_amount')::NUMERIC, 0.00),
+        COALESCE((p_bill_data->>'sgst_amount')::NUMERIC, 0.00),
+        COALESCE((p_bill_data->>'igst_amount')::NUMERIC, 0.00),
+        v_grand_total,
+        v_paid_amount,
+        v_balance_amount,
+        p_bill_data->>'notes'
+    );
+
+    -- 3. Process Received Items, Increment Stock & Record Inward Movement
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_bill_data->'items')
+    LOOP
+        v_item_id := (v_item->>'item_id')::UUID;
+        v_received_qty := (v_item->>'received_quantity')::NUMERIC;
+
+        INSERT INTO public.purchase_invoice_items (
+            purchase_invoice_id,
+            item_id,
+            item_name,
+            hsn_sac_code,
+            quantity,
+            unit,
+            unit_price,
+            tax_rate,
+            tax_amount,
+            total_amount
+        ) VALUES (
+            v_bill_id,
+            v_item_id,
+            v_item->>'item_name',
+            v_item->>'hsn_sac_code',
+            v_received_qty,
+            COALESCE(v_item->>'unit', 'PCS'),
+            (v_item->>'unit_price')::NUMERIC,
+            COALESCE((v_item->>'tax_rate')::NUMERIC, 18.00),
+            COALESCE((v_item->>'tax_amount')::NUMERIC, 0.00),
+            (v_item->>'total_amount')::NUMERIC
+        );
+
+        -- Atomically increment items inventory
+        UPDATE public.items
+        SET current_stock = current_stock + v_received_qty,
+            updated_at = NOW()
+        WHERE id = v_item_id;
+
+        -- Record stock movement ledger entry
+        INSERT INTO public.stock_movements (
+            business_id,
+            item_id,
+            movement_type,
+            quantity,
+            unit_cost,
+            reference_id,
+            notes
+        ) VALUES (
+            v_po.business_id,
+            v_item_id,
+            'PURCHASE_IN',
+            v_received_qty,
+            (v_item->>'unit_price')::NUMERIC,
+            v_bill_id,
+            'Goods Received from PO #' || v_po.po_number || ' (Bill #' || v_bill_number || ')'
+        );
+
+        -- Update PO Item received quantity
+        UPDATE public.purchase_order_items
+        SET received_quantity = received_quantity + v_received_qty
+        WHERE purchase_order_id = p_po_id AND item_id = v_item_id;
+    END LOOP;
+
+    -- 4. Update PO Status
+    UPDATE public.purchase_orders
+    SET status = 'COMPLETED',
+        updated_at = NOW()
+    WHERE id = p_po_id;
+
+    -- 5. Update Supplier Accounts Payable Balance (Negative balance represents our liability to supplier)
+    IF v_balance_amount > 0 THEN
+        UPDATE public.parties
+        SET current_balance = current_balance - v_balance_amount,
+            updated_at = NOW()
+        WHERE id = v_po.supplier_id;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'purchase_invoice_id', v_bill_id,
+        'bill_number', v_bill_number,
+        'balance_amount', v_balance_amount
+    );
+END;
+$$;
+
+-- ==============================================================================
+-- STORED PROCEDURE 2: execute_production_run
+-- Atomically checks raw material inventory, deducts consumption with wastage,
+-- increments target finished good stock, and logs stock movements.
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION public.execute_production_run(
+    p_recipe_id UUID,
+    p_quantity NUMERIC,
+    p_business_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_recipe RECORD;
+    v_ing RECORD;
+    v_required_qty NUMERIC;
+    v_current_stock NUMERIC;
+    v_item_name TEXT;
+    v_run_id UUID := uuid_generate_v4();
+BEGIN
+    -- 1. Fetch BOM Recipe
+    SELECT * INTO v_recipe FROM public.bom_recipes WHERE id = p_recipe_id AND business_id = p_business_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'BOM Recipe % not found for business %', p_recipe_id, p_business_id;
+    END IF;
+
+    -- 2. Validate Stock for all raw materials before executing run
+    FOR v_ing IN SELECT * FROM public.bom_ingredients WHERE recipe_id = p_recipe_id
+    LOOP
+        v_required_qty := v_ing.required_quantity * p_quantity * (1 + COALESCE(v_ing.waste_percentage, 0.0) / 100);
+        
+        SELECT current_stock, name INTO v_current_stock, v_item_name 
+        FROM public.items WHERE id = v_ing.raw_material_item_id;
+
+        IF v_current_stock < v_required_qty THEN
+            RAISE EXCEPTION 'Insufficient stock for raw material "%": Required %, Available %',
+                v_item_name, v_required_qty, v_current_stock;
+        END IF;
+    END LOOP;
+
+    -- 3. Deduct Raw Materials (BOM_CONSUMPTION_OUT)
+    FOR v_ing IN SELECT * FROM public.bom_ingredients WHERE recipe_id = p_recipe_id
+    LOOP
+        v_required_qty := v_ing.required_quantity * p_quantity * (1 + COALESCE(v_ing.waste_percentage, 0.0) / 100);
+
+        UPDATE public.items
+        SET current_stock = current_stock - v_required_qty,
+            updated_at = NOW()
+        WHERE id = v_ing.raw_material_item_id;
+
+        INSERT INTO public.stock_movements (
+            business_id,
+            item_id,
+            movement_type,
+            quantity,
+            reference_id,
+            notes
+        ) VALUES (
+            p_business_id,
+            v_ing.raw_material_item_id,
+            'BOM_CONSUMPTION_OUT',
+            -v_required_qty,
+            v_run_id,
+            'Consumed in Production Run of ' || p_quantity || ' units of recipe: ' || v_recipe.recipe_name
+        );
+    END LOOP;
+
+    -- 4. Increment Finished Good Stock (BOM_MANUFACTURE_IN)
+    UPDATE public.items
+    SET current_stock = current_stock + (p_quantity * v_recipe.output_quantity),
+        updated_at = NOW()
+    WHERE id = v_recipe.output_item_id;
+
+    INSERT INTO public.stock_movements (
+        business_id,
+        item_id,
+        movement_type,
+        quantity,
+        reference_id,
+        notes
+    ) VALUES (
+        p_business_id,
+        v_recipe.output_item_id,
+        'BOM_MANUFACTURE_IN',
+        p_quantity * v_recipe.output_quantity,
+        v_run_id,
+        'Manufactured via BOM Recipe: ' || v_recipe.recipe_name
+    );
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'run_id', v_run_id,
+        'recipe_id', p_recipe_id,
+        'quantity_produced', p_quantity * v_recipe.output_quantity,
+        'finished_good_id', v_recipe.output_item_id
+    );
+END;
+$$;
+
+
