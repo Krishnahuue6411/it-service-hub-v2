@@ -378,3 +378,174 @@ INSERT INTO public.businesses (
         "theme_color": "#0F172A"
     }'::jsonb
 ) ON CONFLICT (id) DO NOTHING;
+
+-- ==============================================================================
+-- ATOMIC TRANSACTION PROCEDURE: create_sales_invoice
+-- Atomically creates invoice, inserts line items, decrements item stock,
+-- records stock_movements (SALE_OUT), updates party ledger balance, and
+-- advances the sequential invoice number.
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION public.create_sales_invoice(p_data JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_business_id UUID := (p_data->>'business_id')::UUID;
+    v_customer_id UUID := (p_data->>'customer_id')::UUID;
+    v_invoice_id UUID := uuid_generate_v4();
+    v_invoice_number TEXT := p_data->>'invoice_number';
+    v_grand_total NUMERIC := (p_data->>'grand_total')::NUMERIC;
+    v_paid_amount NUMERIC := COALESCE((p_data->>'paid_amount')::NUMERIC, 0.00);
+    v_balance_amount NUMERIC := v_grand_total - v_paid_amount;
+    v_item JSONB;
+    v_item_id UUID;
+    v_qty NUMERIC;
+    v_next_number INT;
+BEGIN
+    -- 1. Insert Invoices Header
+    INSERT INTO public.invoices (
+        id,
+        business_id,
+        customer_id,
+        invoice_number,
+        invoice_date,
+        due_date,
+        status,
+        payment_mode,
+        taxable_amount,
+        cgst_amount,
+        sgst_amount,
+        igst_amount,
+        discount_amount,
+        round_off,
+        grand_total,
+        paid_amount,
+        balance_amount,
+        vehicle_number,
+        transporter_name,
+        lr_rr_number,
+        eway_bill_number,
+        print_format,
+        notes
+    ) VALUES (
+        v_invoice_id,
+        v_business_id,
+        v_customer_id,
+        v_invoice_number,
+        COALESCE((p_data->>'invoice_date')::DATE, CURRENT_DATE),
+        (p_data->>'due_date')::DATE,
+        CASE 
+            WHEN v_balance_amount <= 0 THEN 'PAID'
+            WHEN v_paid_amount > 0 THEN 'PARTIALLY_PAID'
+            ELSE 'UNPAID'
+        END,
+        COALESCE(p_data->>'payment_mode', 'CASH'),
+        (p_data->>'taxable_amount')::NUMERIC,
+        COALESCE((p_data->>'cgst_amount')::NUMERIC, 0.00),
+        COALESCE((p_data->>'sgst_amount')::NUMERIC, 0.00),
+        COALESCE((p_data->>'igst_amount')::NUMERIC, 0.00),
+        COALESCE((p_data->>'discount_amount')::NUMERIC, 0.00),
+        COALESCE((p_data->>'round_off')::NUMERIC, 0.00),
+        v_grand_total,
+        v_paid_amount,
+        v_balance_amount,
+        p_data->>'vehicle_number',
+        p_data->>'transporter_name',
+        p_data->>'lr_rr_number',
+        p_data->>'eway_bill_number',
+        COALESCE(p_data->>'print_format', 'A4'),
+        p_data->>'notes'
+    );
+
+    -- 2. Insert Invoice Items and Atomically Decrement Item Inventory
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_data->'items')
+    LOOP
+        v_item_id := (v_item->>'item_id')::UUID;
+        v_qty := (v_item->>'quantity')::NUMERIC;
+
+        INSERT INTO public.invoice_items (
+            invoice_id,
+            item_id,
+            item_name,
+            hsn_sac_code,
+            quantity,
+            unit,
+            unit_price,
+            discount_percent,
+            discount_amount,
+            taxable_value,
+            tax_rate,
+            cgst_amount,
+            sgst_amount,
+            igst_amount,
+            total_amount
+        ) VALUES (
+            v_invoice_id,
+            v_item_id,
+            v_item->>'item_name',
+            v_item->>'hsn_sac_code',
+            v_qty,
+            COALESCE(v_item->>'unit', 'PCS'),
+            (v_item->>'unit_price')::NUMERIC,
+            COALESCE((v_item->>'discount_percent')::NUMERIC, 0.00),
+            COALESCE((v_item->>'discount_amount')::NUMERIC, 0.00),
+            (v_item->>'taxable_value')::NUMERIC,
+            COALESCE((v_item->>'tax_rate')::NUMERIC, 18.00),
+            COALESCE((v_item->>'cgst_amount')::NUMERIC, 0.00),
+            COALESCE((v_item->>'sgst_amount')::NUMERIC, 0.00),
+            COALESCE((v_item->>'igst_amount')::NUMERIC, 0.00),
+            (v_item->>'total_amount')::NUMERIC
+        );
+
+        -- Decrement physical inventory stock
+        UPDATE public.items
+        SET current_stock = current_stock - v_qty,
+            updated_at = NOW()
+        WHERE id = v_item_id;
+
+        -- Record stock movement ledger entry
+        INSERT INTO public.stock_movements (
+            business_id,
+            item_id,
+            movement_type,
+            quantity,
+            unit_cost,
+            reference_id,
+            notes
+        ) VALUES (
+            v_business_id,
+            v_item_id,
+            'SALE_OUT',
+            -v_qty,
+            (v_item->>'unit_price')::NUMERIC,
+            v_invoice_id,
+            'Sold in Tax Invoice #' || v_invoice_number
+        );
+    END LOOP;
+
+    -- 3. Update Customer Khata Ledger Balance if Credit or Partial Payment
+    IF v_balance_amount > 0 THEN
+        UPDATE public.parties
+        SET current_balance = current_balance + v_balance_amount,
+            updated_at = NOW()
+        WHERE id = v_customer_id;
+    END IF;
+
+    -- 4. Advance the Next Invoice Number in businesses.settings
+    v_next_number := COALESCE(((SELECT settings->>'next_invoice_number' FROM public.businesses WHERE id = v_business_id)::INT), 1000) + 1;
+    UPDATE public.businesses
+    SET settings = jsonb_set(settings, '{next_invoice_number}', to_jsonb(v_next_number)),
+        updated_at = NOW()
+    WHERE id = v_business_id;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'invoice_id', v_invoice_id,
+        'invoice_number', v_invoice_number,
+        'balance_amount', v_balance_amount
+    );
+END;
+$$;
+

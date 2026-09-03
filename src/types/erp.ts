@@ -233,3 +233,61 @@ export interface StockMovement {
   notes?: string;
   created_at: string;
 }
+
+// 8. Phase 2 DTOs (Data Transfer Objects)
+export interface CreateInvoiceItemDTO {
+  item_id: string;
+  item_name: string;
+  hsn_sac_code?: string;
+  quantity: number;
+  unit: ItemUnit;
+  unit_price: number;
+  discount_percent: number;
+  discount_amount: number;
+  taxable_value: number;
+  tax_rate: number;
+  cgst_amount: number;
+  sgst_amount: number;
+  igst_amount: number;
+  total_amount: number;
+}
+
+export interface CreateInvoiceDTO {
+  business_id: string;
+  customer_id: string;
+  invoice_number?: string;
+  invoice_date: string;
+  due_date?: string;
+  payment_mode: PaymentMode;
+  taxable_amount: number;
+  cgst_amount: number;
+  sgst_amount: number;
+  igst_amount: number;
+  discount_amount: number;
+  round_off: number;
+  grand_total: number;
+  paid_amount: number;
+  vehicle_number?: string;
+  transporter_name?: string;
+  lr_rr_number?: string;
+  eway_bill_number?: string;
+  print_format: PrintFormat;
+  notes?: string;
+  items: CreateInvoiceItemDTO[];
+}
+
+export interface CreatePartyDTO {
+  business_id: string;
+  type: PartyType;
+  name: string;
+  company_name?: string;
+  phone?: string;
+  email?: string;
+  gstin?: string;
+  state_code?: string;
+  billing_address?: string;
+  shipping_address?: string;
+  credit_limit?: number;
+  opening_balance?: number;
+}
+

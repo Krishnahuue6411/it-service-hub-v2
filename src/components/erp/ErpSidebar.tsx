@@ -124,6 +124,20 @@ export const ErpSidebar: React.FC<ErpSidebarProps> = ({
 
         {/* Navigation Links */}
         <nav className="p-3 space-y-1 text-xs font-bold">
+          {/* Fast Billing CTA */}
+          <Link
+            href="/dashboard/billing/new"
+            className="w-full mb-3 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 active:scale-95 text-slate-950 px-3.5 py-2.5 rounded-xl font-black shadow-lg flex items-center justify-between transition group"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-base font-black">+</span>
+              <span>New Sales Invoice</span>
+            </div>
+            <span className="text-[10px] bg-slate-950 text-amber-400 px-2 py-0.5 rounded-md font-mono">
+              POS Fast
+            </span>
+          </Link>
+
           <div className="text-[10px] font-black text-slate-400 uppercase tracking-wider px-3 py-1.5">
             Operations & Accounting
           </div>

@@ -77,7 +77,7 @@ export default async function ErpDashboardPage() {
           </Link>
 
           <Link
-            href="/dashboard/invoices"
+            href="/dashboard/billing/new"
             className="bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs font-black px-4 py-2.5 rounded-xl shadow-lg transition flex items-center gap-2"
           >
             <Plus className="w-4 h-4 stroke-[3]" />
