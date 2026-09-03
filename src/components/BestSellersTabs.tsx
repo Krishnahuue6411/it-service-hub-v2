@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Star, Plus, Minus, Zap, ShoppingBag, ShieldCheck, Check, Sparkles } from 'lucide-react';
+import { Star, Plus, Minus, Zap, ShoppingBag, Sparkles } from 'lucide-react';
 import { Product, CartItem } from '../types';
 
 interface BestSellersTabsProps {

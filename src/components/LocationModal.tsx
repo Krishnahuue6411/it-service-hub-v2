@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { MapPin, X, Check, Zap, Navigation } from 'lucide-react';
+import { MapPin, X, Check, Zap } from 'lucide-react';
 import { LocationInfo } from '../types';
 import { POPULAR_PINCODES } from '../data/mockData';
 

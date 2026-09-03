@@ -297,7 +297,9 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
                 <hr className="my-2 border-slate-100" />
                 <div className="space-y-1 text-slate-700">
-                  <a href="#" className="block px-2 py-1.5 rounded hover:bg-slate-100 font-medium">Your Orders & GST Invoices</a>
+                  <a href="/account" className="block px-2 py-1.5 rounded hover:bg-slate-100 font-medium">Your Orders & GST Invoices</a>
+                  <a href="/admin" className="block px-2 py-1.5 rounded hover:bg-slate-100 font-medium font-bold text-blue-600">⚙️ Admin Control Portal</a>
+                  <a href="/technician" className="block px-2 py-1.5 rounded hover:bg-slate-100 font-medium font-bold text-amber-600">👷 Field Technician Portal</a>
                   <a href="#" className="block px-2 py-1.5 rounded hover:bg-slate-100 font-medium">B2B Bulk Quote History</a>
                   <a href="#" className="block px-2 py-1.5 rounded hover:bg-slate-100 font-medium">AMC Active Plan Status</a>
                   <a href="#" className="block px-2 py-1.5 rounded hover:bg-slate-100 font-medium text-emerald-600 font-bold flex items-center justify-between">

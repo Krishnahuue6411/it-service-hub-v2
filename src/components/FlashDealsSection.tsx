@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Flame, Star, Plus, Minus, Check, Timer, ChevronLeft, ChevronRight, Zap } from 'lucide-react';
+import { Flame, Star, Plus, Minus, Timer, ChevronLeft, ChevronRight, Zap } from 'lucide-react';
 import { Product, CartItem } from '../types';
 
 interface FlashDealsSectionProps {

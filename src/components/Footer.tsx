@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { PhoneCall, Mail, MapPin, ShieldCheck, Zap, ArrowUpRight } from 'lucide-react';
+import { PhoneCall, Mail, MapPin, ArrowUpRight } from 'lucide-react';
 
 export const Footer: React.FC = () => {
   return (
